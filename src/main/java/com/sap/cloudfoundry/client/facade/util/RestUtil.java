@@ -1,7 +1,11 @@
 package com.sap.cloudfoundry.client.facade.util;
 
+import java.io.IOException;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.security.cert.X509Certificate;
+import java.text.MessageFormat;
+import java.util.Map;
 
 import javax.net.ssl.SSLException;
 import javax.net.ssl.X509TrustManager;
@@ -12,6 +16,8 @@ import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sap.cloudfoundry.client.facade.oauth2.OAuthClient;
 import com.sap.cloudfoundry.client.facade.oauth2.OAuthClientWithLoginHint;
 
@@ -26,13 +32,50 @@ import reactor.netty.http.client.HttpClient;
 public class RestUtil {
 
     private static final int MAX_IN_MEMORY_SIZE = 1 * 1024 * 1024; // 1MB
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public OAuthClient createOAuthClient(URL authorizationUrl) {
-        return new OAuthClient(authorizationUrl);
+    public OAuthClient createOAuthClient(URL controllerUrl, ConnectionContext connectionContext, String origin,
+                                         boolean shouldTrustSelfSignedCertificates) {
+        Map<String, Object> infoMap = getInfoMap(controllerUrl, createWebClient(shouldTrustSelfSignedCertificates));
+        URL authorizationUrl = getAuthorizationUrl(infoMap);
+        return new OAuthClientWithLoginHint(authorizationUrl, connectionContext, origin, createWebClient(true));
     }
 
-    public OAuthClient createOAuthClient(URL authorizationUrl, ConnectionContext connectionContext, String origin) {
-        return new OAuthClientWithLoginHint(authorizationUrl, connectionContext, origin);
+    public OAuthClient createOAuthClientByControllerUrl(URL controllerUrl, boolean shouldTrustSelfSignedCertificates) {
+        WebClient webClient = createWebClient(shouldTrustSelfSignedCertificates);
+        URL authorizationUrl = getAuthorizationUrl(controllerUrl, webClient);
+        return new OAuthClient(authorizationUrl, webClient);
+    }
+
+    private URL getAuthorizationUrl(URL controllerUrl, WebClient webClient) {
+        Map<String, Object> infoMap = getInfoMap(controllerUrl, webClient);
+        return getAuthorizationUrl(infoMap);
+    }
+
+    // TODO: Refactor not to use v2
+    private Map<String, Object> getInfoMap(URL controllerUrl, WebClient webClient) {
+        String infoResponse = webClient.get()
+                                       .uri(controllerUrl + "/v2/info")
+                                       .retrieve()
+                                       .bodyToMono(String.class)
+                                       .block();
+        try {
+            return objectMapper.readValue(infoResponse, new TypeReference<Map<String, Object>>() {
+            });
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Error getting /v2/info from cloud controller.", e);
+        }
+    }
+
+    private URL getAuthorizationUrl(Map<String, Object> infoMap) {
+        String authorizationEndpoint = (String) infoMap.get("authorization_endpoint");
+        try {
+            return new URL(authorizationEndpoint);
+        } catch (MalformedURLException e) {
+            throw new IllegalArgumentException(MessageFormat.format("Error creating authorization endpoint URL for endpoint {0}.",
+                                                                    authorizationEndpoint),
+                                               e);
+        }
     }
 
     public WebClient createWebClient(boolean trustSelfSignedCerts) {
